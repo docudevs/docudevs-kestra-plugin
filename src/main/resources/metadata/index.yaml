@@ -1,8 +1,8 @@
-group: io.kestra.plugin.template
-name: "template"
-title: "Template"
-description: "Plugin template for Kestra"
+group: io.kestra.plugin.docudevs
+name: "docudevs"
+title: "DocuDevs"
+description: "Extract structured data from documents using DocuDevs AI."
 body: ""
 videos: []
-createdBy: "Kestra Core Team"
-managedBy: "Kestra Core Team"
+createdBy: "DocuDevs"
+managedBy: "DocuDevs"
