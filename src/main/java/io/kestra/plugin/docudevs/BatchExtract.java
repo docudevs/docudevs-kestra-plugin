@@ -8,8 +8,8 @@ import ai.docudevs.client.generated.api.BatchApi;
 import ai.docudevs.client.generated.api.JobApi;
 import ai.docudevs.client.generated.internal.ApiClient;
 import ai.docudevs.client.generated.internal.ApiException;
-import ai.docudevs.client.generated.model.CreateBatchRequest;
-import ai.docudevs.client.generated.model.ProcessBatchRequest;
+import ai.docudevs.client.generated.model.BatchCreateRequest;
+import ai.docudevs.client.generated.model.UploadCommand;
 import ai.docudevs.client.generated.model.ProcessingJob;
 import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.models.annotations.PluginProperty;
@@ -60,7 +60,6 @@ tasks:
   - id: batch_extract
     type: io.kestra.plugin.docudevs.BatchExtract
     apiKey: "{{ secret('DOCUDEVS_API_KEY') }}"
-    orgId: "{{ secret('DOCUDEVS_ORG_ID') }}"
     files:
       - /tmp/invoice-a.pdf
       - /tmp/invoice-b.pdf
@@ -93,7 +92,6 @@ tasks:
   - id: batch_extract
     type: io.kestra.plugin.docudevs.BatchExtract
     apiKey: "{{ secret('DOCUDEVS_API_KEY') }}"
-    orgId: "{{ secret('DOCUDEVS_ORG_ID') }}"
     files: "{{ inputs.files }}"
     resultFormat: JSON
     command:
@@ -119,13 +117,6 @@ public class BatchExtract extends AbstractDocuDevsTask implements RunnableTask<B
         description = "DocuDevs API base URL."
     )
     private Property<String> baseUrl = Property.ofValue(DEFAULT_BASE_URL);
-
-    @NotNull
-    @Schema(
-        title = "DocuDevs organization ID",
-        description = "Organization ID required by DocuDevs batch endpoints."
-    )
-    private Property<String> orgId;
 
     @NotNull
     @PluginProperty(internalStorageURI = true)
@@ -176,7 +167,6 @@ public class BatchExtract extends AbstractDocuDevsTask implements RunnableTask<B
     public Output run(RunContext runContext) throws Exception {
         var rApiKey = runContext.render(this.apiKey).as(String.class).orElseThrow();
         var rBaseUrl = runContext.render(this.baseUrl).as(String.class).orElse(DEFAULT_BASE_URL);
-        var rOrgId = runContext.render(this.orgId).as(String.class).orElseThrow();
         var rFiles = runContext.render(this.files).asList(String.class);
         var rResultFormat = this.resultFormat(runContext);
         var rTimeout = this.completionTimeout == null ? Duration.ofMinutes(20) : this.completionTimeout;
@@ -201,14 +191,14 @@ public class BatchExtract extends AbstractDocuDevsTask implements RunnableTask<B
             .pollInterval(rPollInterval)
             .build();
 
-        var batchGuid = this.createBatch(batchApi, runContext, rOrgId);
+        var batchGuid = this.createBatch(batchApi, runContext);
         runContext.logger().info("Created DocuDevs batch job {}", batchGuid);
 
         try {
-            var uploadedCount = this.uploadFiles(batchApi, runContext, batchGuid, rOrgId, rFiles);
+            var uploadedCount = this.uploadFiles(batchApi, runContext, batchGuid, rFiles);
             runContext.logger().info("Uploaded {} files to DocuDevs batch {}", uploadedCount, batchGuid);
 
-            this.processBatch(batchApi, runContext, apiClient, batchGuid, rOrgId);
+            this.processBatch(batchApi, runContext, apiClient, batchGuid);
             runContext.logger().info("Started DocuDevs batch processing {}", batchGuid);
 
             var resultPayload = this.fetchBatchResult(runContext, apiClient, jobApi, facadeClient, batchGuid, rResultFormat, waitOptions);
@@ -240,9 +230,8 @@ public class BatchExtract extends AbstractDocuDevsTask implements RunnableTask<B
         }
     }
 
-    private String createBatch(BatchApi batchApi, RunContext runContext, String orgId) throws Exception {
-        var request = new CreateBatchRequest();
-        request.setOrgId(orgId);
+    private String createBatch(BatchApi batchApi, RunContext runContext) throws Exception {
+        var request = new BatchCreateRequest();
         if (this.maxConcurrency != null) {
             var rMaxConcurrency = runContext.render(this.maxConcurrency).as(Integer.class).orElse(null);
             request.setMaxConcurrency(rMaxConcurrency);
@@ -256,12 +245,12 @@ public class BatchExtract extends AbstractDocuDevsTask implements RunnableTask<B
         }
     }
 
-    private int uploadFiles(BatchApi batchApi, RunContext runContext, String batchGuid, String orgId, List<String> files) throws Exception {
+    private int uploadFiles(BatchApi batchApi, RunContext runContext, String batchGuid, List<String> files) throws Exception {
         var uploadedCount = 0;
         for (var from : files) {
             var path = this.materializeInputFile(runContext, from);
             try {
-                batchApi.uploadBatchDocument(batchGuid, path.toFile(), orgId);
+                batchApi.uploadBatchDocument(batchGuid, path.toFile());
                 uploadedCount++;
             } catch (ApiException e) {
                 throw new IllegalStateException("DocuDevs batch upload failed for " + batchGuid + ": " + e.getCode(), e);
@@ -270,8 +259,8 @@ public class BatchExtract extends AbstractDocuDevsTask implements RunnableTask<B
         return uploadedCount;
     }
 
-    private void processBatch(BatchApi batchApi, RunContext runContext, ApiClient apiClient, String batchGuid, String orgId) throws Exception {
-        var request = this.processBatchRequest(runContext, apiClient, orgId);
+    private void processBatch(BatchApi batchApi, RunContext runContext, ApiClient apiClient, String batchGuid) throws Exception {
+        var request = this.processBatchRequest(runContext, apiClient);
         try {
             batchApi.processBatch(batchGuid, request);
         } catch (ApiException e) {
@@ -279,20 +268,19 @@ public class BatchExtract extends AbstractDocuDevsTask implements RunnableTask<B
         }
     }
 
-    private ProcessBatchRequest processBatchRequest(RunContext runContext, ApiClient apiClient, String orgId) throws Exception {
-        ProcessBatchRequest request;
+    private UploadCommand processBatchRequest(RunContext runContext, ApiClient apiClient) throws Exception {
+        UploadCommand request;
         if (this.command == null) {
-            request = new ProcessBatchRequest();
+            request = new UploadCommand();
         } else {
             var renderedCommand = runContext.render(this.command).asMap(String.class, Object.class);
             try {
-                request = apiClient.getObjectMapper().convertValue(renderedCommand, ProcessBatchRequest.class);
+                request = apiClient.getObjectMapper().convertValue(renderedCommand, UploadCommand.class);
             } catch (IllegalArgumentException e) {
                 throw new IllegalArgumentException("Invalid DocuDevs batch command payload", e);
             }
         }
 
-        request.setOrgId(orgId);
         return request;
     }
 

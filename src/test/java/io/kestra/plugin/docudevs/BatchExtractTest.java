@@ -77,7 +77,6 @@ class BatchExtractTest {
             .id("batch")
             .apiKey(new Property<>("{{ apiKey }}"))
             .baseUrl(Property.ofValue(server.url("/").toString()))
-            .orgId(Property.ofValue("org-123"))
             .files(Property.ofValue(List.of(file1.toString(), file2.toString())))
             .maxConcurrency(Property.ofValue(2))
             .resultFormat(Property.ofValue("EXCEL"))
@@ -112,13 +111,11 @@ class BatchExtractTest {
         assertThat(createRequest.getPath(), is("/document/batch"));
         assertThat(createRequest.getHeader("Authorization"), is("batch-key"));
         JsonNode createBody = objectMapper.readTree(createRequest.getBody().readUtf8());
-        assertThat(createBody.path("orgId").asText(), is("org-123"));
         assertThat(createBody.path("maxConcurrency").asInt(), is(2));
 
         RecordedRequest upload1 = server.takeRequest(1, TimeUnit.SECONDS);
         assertThat(upload1.getPath(), is("/document/batch/batch-123/upload"));
         assertThat(upload1.getHeader("Authorization"), is("batch-key"));
-        assertThat(upload1.getBody().readUtf8(), containsString("name=\"orgId\""));
 
         RecordedRequest upload2 = server.takeRequest(1, TimeUnit.SECONDS);
         assertThat(upload2.getPath(), is("/document/batch/batch-123/upload"));
@@ -126,7 +123,6 @@ class BatchExtractTest {
         RecordedRequest processRequest = server.takeRequest(1, TimeUnit.SECONDS);
         assertThat(processRequest.getPath(), is("/document/batch/batch-123/process"));
         JsonNode processBody = objectMapper.readTree(processRequest.getBody().readUtf8());
-        assertThat(processBody.path("orgId").asText(), is("org-123"));
         assertThat(processBody.path("ocr").asText(), is("PREMIUM"));
         assertThat(processBody.path("llm").asText(), is("HIGH"));
         assertThat(processBody.path("extractionMode").asText(), is("STEPS"));
@@ -160,7 +156,6 @@ class BatchExtractTest {
             .id("batch")
             .apiKey(Property.ofValue("batch-key"))
             .baseUrl(Property.ofValue(server.url("/").toString()))
-            .orgId(Property.ofValue("org-123"))
             .files(Property.ofValue(List.of(file.toString())))
             .resultFormat(Property.ofValue("JSON"))
             .pollInterval(Duration.ofMillis(5))
