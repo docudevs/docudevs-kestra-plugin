@@ -219,4 +219,85 @@ class ExtractTest {
         assertThat(thrown.getMessage(), containsString("FAILED"));
         assertThat(thrown.getMessage(), containsString("invalid schema"));
     }
+
+    @Test
+    void runUsesConfigurationNameEndpoint(@TempDir Path tempDir) throws Exception {
+        // Upload response
+        server.enqueue(new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"guid\":\"job-cfg\",\"status\":\"PENDING\"}"));
+        // Process-with-configuration response
+        server.enqueue(new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"guid\":\"job-cfg\",\"status\":\"PENDING\"}"));
+        // Status poll: COMPLETED
+        server.enqueue(new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"status\":\"COMPLETED\",\"guid\":\"job-cfg\",\"tokenCount\":10}"));
+        // Result JSON
+        server.enqueue(new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"name\":\"Acme Corp\"}"));
+        // Post-wait status
+        server.enqueue(new MockResponse()
+            .setResponseCode(200)
+            .setHeader("Content-Type", "application/json")
+            .setBody("{\"status\":\"COMPLETED\",\"guid\":\"job-cfg\",\"tokenCount\":10}"));
+
+        var inputFile = tempDir.resolve("doc.pdf");
+        Files.writeString(inputFile, "fake");
+
+        RunContext runContext = runContextFactory.of(Map.of());
+
+        var task = Extract.builder()
+            .id("extract")
+            .apiKey(Property.ofValue("test-key"))
+            .baseUrl(Property.ofValue(server.url("/").toString()))
+            .from(Property.ofValue(inputFile.toString()))
+            .configurationName(Property.ofValue("invoice-extraction"))
+            .pollInterval(Duration.ofMillis(5))
+            .completionTimeout(Duration.ofSeconds(2))
+            .build();
+
+        var output = task.run(runContext);
+
+        assertThat(output.getGuid(), is("job-cfg"));
+        assertThat(output.getStatus(), is("COMPLETED"));
+        assertThat(output.getTokenCount(), is(10));
+        assertThat(((Map<?, ?>) output.getResult()).get("name"), is("Acme Corp"));
+
+        // Verify upload
+        RecordedRequest uploadRequest = server.takeRequest(1, TimeUnit.SECONDS);
+        assertThat(uploadRequest, notNullValue());
+        assertThat(uploadRequest.getPath(), is("/document/upload"));
+
+        // Verify process call used configuration endpoint
+        RecordedRequest processRequest = server.takeRequest(1, TimeUnit.SECONDS);
+        assertThat(processRequest, notNullValue());
+        assertThat(processRequest.getPath(), containsString("/document/process/job-cfg/with-configuration/invoice-extraction"));
+    }
+
+    @Test
+    void rejectsConfigurationNameAndCommandTogether(@TempDir Path tempDir) throws Exception {
+        var inputFile = tempDir.resolve("doc.pdf");
+        Files.writeString(inputFile, "fake");
+
+        RunContext runContext = runContextFactory.of(Map.of());
+
+        var task = Extract.builder()
+            .id("extract")
+            .apiKey(Property.ofValue("test-key"))
+            .baseUrl(Property.ofValue("http://localhost"))
+            .from(Property.ofValue(inputFile.toString()))
+            .configurationName(Property.ofValue("my-config"))
+            .command(new Property<>(Map.of("prompt", "Extract data")))
+            .build();
+
+        var thrown = assertThrows(IllegalArgumentException.class, () -> task.run(runContext));
+        assertThat(thrown.getMessage(), containsString("mutually exclusive"));
+    }
 }

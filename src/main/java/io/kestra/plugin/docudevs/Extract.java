@@ -47,7 +47,7 @@ import java.util.Objects;
 @Plugin(
     examples = {
         @io.kestra.core.models.annotations.Example(
-            title = "Extract invoice data",
+            title = "Extract invoice data with inline command",
             full = true,
             code = """
 id: docudevs_extract
@@ -64,6 +64,21 @@ tasks:
       llm: HIGH
       prompt: Extract invoice fields
       schema: '{"type":"object","properties":{"invoiceNumber":{"type":"string"}}}'
+"""
+        ),
+        @io.kestra.core.models.annotations.Example(
+            title = "Extract using a saved configuration",
+            full = true,
+            code = """
+id: docudevs_extract_with_config
+namespace: company.team
+
+tasks:
+  - id: extract
+    type: io.kestra.plugin.docudevs.Extract
+    apiKey: "{{ secret('DOCUDEVS_API_KEY') }}"
+    from: /tmp/invoice.pdf
+    configurationName: invoice-extraction
 """
         )
     }
@@ -106,11 +121,22 @@ public class Extract extends AbstractDocuDevsTask implements RunnableTask<Extrac
     private Property<String> dependsOn;
 
     @Schema(
+        title = "Saved configuration name",
+        description = """
+            Name of a saved DocuDevs named configuration to use for extraction.
+            When set, the task calls the configuration-based process endpoint instead of
+            sending an inline command payload. Mutually exclusive with `command`.
+            """
+    )
+    private Property<String> configurationName;
+
+    @Schema(
         title = "Extraction command payload",
         description = """
             Full DocuDevs `UploadCommand` payload sent to `/document/process/{guid}`.
             This supports all extraction parameters available in the API, including nested
             `mapReduce`, `mapReduce.header`, `tools`, `trace`, and `pageRange`.
+            Mutually exclusive with `configurationName`.
             """
     )
     private Property<Map<String, Object>> command;
@@ -135,8 +161,13 @@ public class Extract extends AbstractDocuDevsTask implements RunnableTask<Extrac
         var rBaseUrl = runContext.render(this.baseUrl).as(String.class).orElse(DEFAULT_BASE_URL);
         var rFrom = runContext.render(this.from).as(String.class).orElseThrow();
         var rDependsOn = this.dependsOn == null ? null : runContext.render(this.dependsOn).as(String.class).orElse(null);
+        var rConfigName = this.configurationName == null ? null : runContext.render(this.configurationName).as(String.class).orElse(null);
         var rTimeout = this.completionTimeout == null ? Duration.ofMinutes(10) : this.completionTimeout;
         var rPollInterval = this.pollInterval == null ? Duration.ofSeconds(2) : this.pollInterval;
+
+        if (rConfigName != null && this.command != null) {
+            throw new IllegalArgumentException("configurationName and command are mutually exclusive");
+        }
 
         if (rTimeout.isZero() || rTimeout.isNegative()) {
             throw new IllegalArgumentException("timeout must be greater than zero");
@@ -149,7 +180,6 @@ public class Extract extends AbstractDocuDevsTask implements RunnableTask<Extrac
         var documentApi = new DocumentApi(apiClient);
         var jobApi = new JobApi(apiClient);
         var facadeClient = this.docuDevsClient(rBaseUrl, rApiKey);
-        var uploadCommand = this.uploadCommand(runContext, apiClient);
         var uploadFile = this.materializeInputFile(runContext, rFrom);
 
         runContext.logger().info("Uploading document to DocuDevs: {}", uploadFile.getFileName());
@@ -159,7 +189,12 @@ public class Extract extends AbstractDocuDevsTask implements RunnableTask<Extrac
 
         runContext.logger().info("Submitting DocuDevs extraction job {}", guid);
 
-        this.callProcess(documentApi, guid, rDependsOn, uploadCommand);
+        if (rConfigName != null) {
+            this.callProcessWithConfiguration(documentApi, guid, rConfigName, rDependsOn);
+        } else {
+            var uploadCommand = this.uploadCommand(runContext, apiClient);
+            this.callProcess(documentApi, guid, rDependsOn, uploadCommand);
+        }
 
         var waitOptions = WaitOptions.builder()
             .timeout(rTimeout)
@@ -217,6 +252,17 @@ public class Extract extends AbstractDocuDevsTask implements RunnableTask<Extrac
     private void callProcess(DocumentApi documentApi, String guid, String dependsOn, UploadCommand uploadCommand) {
         try {
             var response = documentApi.processDocument(guid, dependsOn, uploadCommand);
+            if (response != null && response.getError() != null && !response.getError().isBlank()) {
+                throw new IllegalStateException("DocuDevs process request returned error for " + guid + ": " + response.getError());
+            }
+        } catch (ApiException e) {
+            throw new IllegalStateException("DocuDevs process request failed for " + guid + ": " + e.getCode(), e);
+        }
+    }
+
+    private void callProcessWithConfiguration(DocumentApi documentApi, String guid, String configurationName, String dependsOn) {
+        try {
+            var response = documentApi.processDocumentWithConfiguration(guid, configurationName, dependsOn);
             if (response != null && response.getError() != null && !response.getError().isBlank()) {
                 throw new IllegalStateException("DocuDevs process request returned error for " + guid + ": " + response.getError());
             }

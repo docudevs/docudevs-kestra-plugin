@@ -170,6 +170,83 @@ class BatchExtractTest {
         assertThat(thrown.getMessage(), containsString("invalid schema"));
     }
 
+    @Test
+    void runFetchesConfigurationByNameForBatchProcessing(@TempDir Path tempDir) throws Exception {
+        // Create batch
+        server.enqueue(jsonResponse("{\"jobGuid\":\"batch-cfg\",\"maxConcurrency\":1}"));
+        // Upload file
+        server.enqueue(jsonResponse("{\"jobGuid\":\"batch-cfg\",\"index\":0,\"totalDocuments\":1}"));
+        // Get configuration by name
+        server.enqueue(jsonResponse("{\"ocr\":\"PREMIUM\",\"llm\":\"HIGH\",\"extractionMode\":\"STEPS\",\"prompt\":\"Config prompt\",\"schema\":\"{\\\"type\\\":\\\"array\\\"}\"}"));
+        // Process batch
+        server.enqueue(jsonResponse("{\"jobGuid\":\"batch-cfg\",\"maxConcurrency\":1}"));
+        // Status poll: COMPLETED
+        server.enqueue(jsonResponse("{\"status\":\"COMPLETED\",\"guid\":\"batch-cfg\",\"tokenCount\":15}"));
+        // Result JSON
+        server.enqueue(jsonResponse("[{\"name\":\"Acme\"}]"));
+        // Post-wait status
+        server.enqueue(jsonResponse("{\"status\":\"COMPLETED\",\"guid\":\"batch-cfg\",\"tokenCount\":15}"));
+
+        var file = tempDir.resolve("doc.pdf");
+        Files.writeString(file, "fake");
+
+        RunContext runContext = runContextFactory.of(Map.of());
+
+        var task = BatchExtract.builder()
+            .id("batch")
+            .apiKey(Property.ofValue("test-key"))
+            .baseUrl(Property.ofValue(server.url("/").toString()))
+            .files(Property.ofValue(List.of(file.toString())))
+            .resultFormat(Property.ofValue("JSON"))
+            .configurationName(Property.ofValue("my-batch-config"))
+            .pollInterval(Duration.ofMillis(5))
+            .completionTimeout(Duration.ofSeconds(2))
+            .build();
+
+        var output = task.run(runContext);
+
+        assertThat(output.getJobGuid(), is("batch-cfg"));
+        assertThat(output.getStatus(), is("COMPLETED"));
+        assertThat(output.getTokenCount(), is(15));
+
+        // Verify: create batch -> upload -> get config -> process batch -> status -> result -> status
+        RecordedRequest createReq = server.takeRequest(1, TimeUnit.SECONDS);
+        assertThat(createReq.getPath(), is("/document/batch"));
+
+        RecordedRequest uploadReq = server.takeRequest(1, TimeUnit.SECONDS);
+        assertThat(uploadReq.getPath(), is("/document/batch/batch-cfg/upload"));
+
+        RecordedRequest configReq = server.takeRequest(1, TimeUnit.SECONDS);
+        assertThat(configReq.getPath(), is("/configuration/my-batch-config"));
+        assertThat(configReq.getMethod(), is("GET"));
+
+        RecordedRequest processReq = server.takeRequest(1, TimeUnit.SECONDS);
+        assertThat(processReq.getPath(), is("/document/batch/batch-cfg/process"));
+        JsonNode processBody = objectMapper.readTree(processReq.getBody().readUtf8());
+        assertThat(processBody.path("ocr").asText(), is("PREMIUM"));
+        assertThat(processBody.path("prompt").asText(), is("Config prompt"));
+    }
+
+    @Test
+    void rejectsConfigurationNameAndCommandTogether(@TempDir Path tempDir) throws Exception {
+        var file = tempDir.resolve("doc.pdf");
+        Files.writeString(file, "fake");
+
+        RunContext runContext = runContextFactory.of(Map.of());
+
+        var task = BatchExtract.builder()
+            .id("batch")
+            .apiKey(Property.ofValue("test-key"))
+            .baseUrl(Property.ofValue("http://localhost"))
+            .files(Property.ofValue(List.of(file.toString())))
+            .configurationName(Property.ofValue("my-config"))
+            .command(new Property<>(Map.of("prompt", "Extract data")))
+            .build();
+
+        var thrown = assertThrows(IllegalArgumentException.class, () -> task.run(runContext));
+        assertThat(thrown.getMessage(), containsString("mutually exclusive"));
+    }
+
     private MockResponse jsonResponse(String body) {
         return new MockResponse()
             .setResponseCode(200)
