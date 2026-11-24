@@ -83,9 +83,12 @@ class BatchExtractTest {
             .pollInterval(Duration.ofMillis(5))
             .completionTimeout(Duration.ofSeconds(2))
             .command(new Property<>(Map.of(
-                "ocr", "PREMIUM",
+                "ocr", "AUTO",
                 "llm", "HIGH",
-                "extractionMode", "STEPS",
+                "extractionMode", "PIPELINE",
+                "pipeline", Map.of("version", 1),
+                "reasoningEffort", "low",
+                "sourceLocations", true,
                 "prompt", "Extract invoices",
                 "schema", "{\"type\":\"array\"}",
                 "trace", true
@@ -123,9 +126,12 @@ class BatchExtractTest {
         RecordedRequest processRequest = server.takeRequest(1, TimeUnit.SECONDS);
         assertThat(processRequest.getPath(), is("/document/batch/batch-123/process"));
         JsonNode processBody = objectMapper.readTree(processRequest.getBody().readUtf8());
-        assertThat(processBody.path("ocr").asText(), is("PREMIUM"));
+        assertThat(processBody.path("ocr").asText(), is("AUTO"));
         assertThat(processBody.path("llm").asText(), is("HIGH"));
-        assertThat(processBody.path("extractionMode").asText(), is("STEPS"));
+        assertThat(processBody.path("extractionMode").asText(), is("PIPELINE"));
+        assertThat(processBody.path("pipeline").path("version").asInt(), is(1));
+        assertThat(processBody.path("reasoningEffort").asText(), is("low"));
+        assertThat(processBody.path("sourceLocations").asBoolean(), is(true));
         assertThat(processBody.path("prompt").asText(), is("Extract invoices"));
         assertThat(processBody.path("schema").asText(), is("{\"type\":\"array\"}"));
         assertThat(processBody.path("trace").asBoolean(), is(true));
@@ -171,13 +177,11 @@ class BatchExtractTest {
     }
 
     @Test
-    void runFetchesConfigurationByNameForBatchProcessing(@TempDir Path tempDir) throws Exception {
+    void runProcessesTheNamedConfigurationOnTheServer(@TempDir Path tempDir) throws Exception {
         // Create batch
         server.enqueue(jsonResponse("{\"jobGuid\":\"batch-cfg\",\"maxConcurrency\":1}"));
         // Upload file
         server.enqueue(jsonResponse("{\"jobGuid\":\"batch-cfg\",\"index\":0,\"totalDocuments\":1}"));
-        // Get configuration by name
-        server.enqueue(jsonResponse("{\"ocr\":\"PREMIUM\",\"llm\":\"HIGH\",\"extractionMode\":\"STEPS\",\"prompt\":\"Config prompt\",\"schema\":\"{\\\"type\\\":\\\"array\\\"}\"}"));
         // Process batch
         server.enqueue(jsonResponse("{\"jobGuid\":\"batch-cfg\",\"maxConcurrency\":1}"));
         // Status poll: COMPLETED
@@ -198,7 +202,7 @@ class BatchExtractTest {
             .baseUrl(Property.ofValue(server.url("/").toString()))
             .files(Property.ofValue(List.of(file.toString())))
             .resultFormat(Property.ofValue("JSON"))
-            .configurationName(Property.ofValue("my-batch-config"))
+            .configurationName(Property.ofValue("My batch config"))
             .pollInterval(Duration.ofMillis(5))
             .completionTimeout(Duration.ofSeconds(2))
             .build();
@@ -209,22 +213,13 @@ class BatchExtractTest {
         assertThat(output.getStatus(), is("COMPLETED"));
         assertThat(output.getTokenCount(), is(15));
 
-        // Verify: create batch -> upload -> get config -> process batch -> status -> result -> status
-        RecordedRequest createReq = server.takeRequest(1, TimeUnit.SECONDS);
-        assertThat(createReq.getPath(), is("/document/batch"));
-
-        RecordedRequest uploadReq = server.takeRequest(1, TimeUnit.SECONDS);
-        assertThat(uploadReq.getPath(), is("/document/batch/batch-cfg/upload"));
-
-        RecordedRequest configReq = server.takeRequest(1, TimeUnit.SECONDS);
-        assertThat(configReq.getPath(), is("/configuration/my-batch-config"));
-        assertThat(configReq.getMethod(), is("GET"));
+        assertThat(server.takeRequest(1, TimeUnit.SECONDS).getPath(), is("/document/batch"));
+        assertThat(server.takeRequest(1, TimeUnit.SECONDS).getPath(), is("/document/batch/batch-cfg/upload"));
 
         RecordedRequest processReq = server.takeRequest(1, TimeUnit.SECONDS);
-        assertThat(processReq.getPath(), is("/document/batch/batch-cfg/process"));
-        JsonNode processBody = objectMapper.readTree(processReq.getBody().readUtf8());
-        assertThat(processBody.path("ocr").asText(), is("PREMIUM"));
-        assertThat(processBody.path("prompt").asText(), is("Config prompt"));
+        assertThat(processReq.getPath(), is("/document/batch/batch-cfg/process/with-configuration/My%20batch%20config"));
+        assertThat(processReq.getMethod(), is("POST"));
+        assertThat(processReq.getHeader("Authorization"), is("test-key"));
     }
 
     @Test

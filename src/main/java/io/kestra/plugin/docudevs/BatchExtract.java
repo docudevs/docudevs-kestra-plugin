@@ -5,12 +5,10 @@ import ai.docudevs.client.DocuDevsClient;
 import ai.docudevs.client.DocuDevsTimeoutException;
 import ai.docudevs.client.WaitOptions;
 import ai.docudevs.client.generated.api.BatchApi;
-import ai.docudevs.client.generated.api.ConfigurationApi;
 import ai.docudevs.client.generated.api.JobApi;
 import ai.docudevs.client.generated.internal.ApiClient;
 import ai.docudevs.client.generated.internal.ApiException;
 import ai.docudevs.client.generated.model.BatchCreateRequest;
-import ai.docudevs.client.generated.model.UploadCommand;
 import ai.docudevs.client.generated.model.ProcessingJob;
 import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.models.annotations.PluginProperty;
@@ -27,6 +25,9 @@ import lombok.ToString;
 import lombok.experimental.SuperBuilder;
 
 import java.io.ByteArrayInputStream;
+import java.net.URI;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
@@ -44,7 +45,7 @@ import java.util.Objects;
         Creates a DocuDevs batch job, uploads multiple input files, starts processing,
         waits for completion, and returns JSON results or stores CSV/Excel outputs in Kestra storage.
 
-        The `command` property is passed through to the DocuDevs `ProcessBatchRequest` model and
+        The `command` property accepts the DocuDevs API's `UploadCommand` payload and
         supports the batch extraction parameters available in the API.
         """
 )
@@ -149,7 +150,7 @@ public class BatchExtract extends AbstractDocuDevsTask implements RunnableTask<B
         title = "Saved configuration name",
         description = """
             Name of a saved DocuDevs named configuration to use for batch extraction.
-            The configuration is fetched from the API and used as the processing command.
+            The API resolves the configuration, including its associated artifacts.
             Mutually exclusive with `command`.
             """
     )
@@ -158,7 +159,7 @@ public class BatchExtract extends AbstractDocuDevsTask implements RunnableTask<B
     @Schema(
         title = "Batch processing command payload",
         description = """
-            DocuDevs `ProcessBatchRequest` payload.
+            DocuDevs `UploadCommand` payload, submitted directly to the API.
             Supports extraction parameters such as `ocr`, `llm`, `extractionMode`, `schema`,
             `prompt`, `mapReduce`, `tools`, `trace`, `pageRange`, and figure options.
             Mutually exclusive with `configurationName`.
@@ -232,7 +233,7 @@ public class BatchExtract extends AbstractDocuDevsTask implements RunnableTask<B
             var uploadedCount = this.uploadFiles(batchApi, runContext, batchGuid, rFiles);
             runContext.logger().info("Uploaded {} files to DocuDevs batch {}", uploadedCount, batchGuid);
 
-            this.processBatch(batchApi, runContext, apiClient, batchGuid, rConfigName);
+            this.processBatch(runContext, apiClient, batchGuid, rConfigName);
             runContext.logger().info("Started DocuDevs batch processing {}", batchGuid);
 
             var resultPayload = this.fetchBatchResult(runContext, apiClient, jobApi, facadeClient, batchGuid, rResultFormat, waitOptions);
@@ -293,34 +294,23 @@ public class BatchExtract extends AbstractDocuDevsTask implements RunnableTask<B
         return uploadedCount;
     }
 
-    private void processBatch(BatchApi batchApi, RunContext runContext, ApiClient apiClient, String batchGuid, String configName) throws Exception {
-        var request = this.processBatchRequest(runContext, apiClient, configName);
-        try {
-            batchApi.processBatch(batchGuid, request);
-        } catch (ApiException e) {
-            throw new IllegalStateException("DocuDevs batch process request failed for " + batchGuid + ": " + e.getCode(), e);
-        }
-    }
-
-    private UploadCommand processBatchRequest(RunContext runContext, ApiClient apiClient, String configName) throws Exception {
+    private void processBatch(RunContext runContext, ApiClient apiClient, String batchGuid, String configName) throws Exception {
+        String path = "/document/batch/" + ApiClient.urlEncode(batchGuid) + "/process";
         if (configName != null) {
-            try {
-                var configApi = new ConfigurationApi(apiClient);
-                return configApi.getConfiguration(configName);
-            } catch (ApiException e) {
-                throw new IllegalStateException("Failed to fetch DocuDevs configuration '" + configName + "': " + e.getCode(), e);
-            }
+            path += "/with-configuration/" + ApiClient.urlEncode(configName);
         }
-
-        if (this.command == null) {
-            return new UploadCommand();
-        }
-
-        var renderedCommand = runContext.render(this.command).asMap(String.class, Object.class);
-        try {
-            return apiClient.getObjectMapper().convertValue(renderedCommand, UploadCommand.class);
-        } catch (IllegalArgumentException e) {
-            throw new IllegalArgumentException("Invalid DocuDevs batch command payload", e);
+        var commandBody = this.command == null
+            ? Map.<String, Object>of()
+            : runContext.render(this.command).asMap(String.class, Object.class);
+        var request = HttpRequest.newBuilder(URI.create(apiClient.getBaseUri() + path))
+            .timeout(apiClient.getReadTimeout())
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofByteArray(apiClient.getObjectMapper().writeValueAsBytes(commandBody)));
+        apiClient.getRequestInterceptor().accept(request);
+        var response = apiClient.getHttpClient().send(request.build(), HttpResponse.BodyHandlers.discarding());
+        if (response.statusCode() < 200 || response.statusCode() >= 300) {
+            throw new IllegalStateException("DocuDevs batch process request failed: " + response.statusCode());
         }
     }
 
