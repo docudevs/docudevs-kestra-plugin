@@ -29,10 +29,12 @@ import java.net.URI;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.IntStream;
 
 @SuperBuilder
 @ToString
@@ -194,6 +196,12 @@ public class BatchExtract extends AbstractDocuDevsTask implements RunnableTask<B
     )
     private Duration completionTimeout = Duration.ofMinutes(20);
 
+    @Schema(
+        title = "Include successful input files",
+        description = "Expose the original input file references whose batch results are present, including for Excel and CSV."
+    )
+    private Property<Boolean> includeSuccessfulFiles;
+
     @Override
     public Output run(RunContext runContext) throws Exception {
         var rApiKey = runContext.render(this.apiKey).as(String.class).orElseThrow();
@@ -201,6 +209,8 @@ public class BatchExtract extends AbstractDocuDevsTask implements RunnableTask<B
         var rFiles = runContext.render(this.files).asList(String.class);
         var rConfigName = this.configurationName == null ? null : runContext.render(this.configurationName).as(String.class).orElse(null);
         var rResultFormat = this.resultFormat(runContext);
+        var rIncludeSuccessfulFiles = includeSuccessfulFiles != null
+            && runContext.render(includeSuccessfulFiles).as(Boolean.class).orElse(false);
         var rTimeout = this.completionTimeout == null ? Duration.ofMinutes(20) : this.completionTimeout;
         var rPollInterval = this.pollInterval == null ? Duration.ofSeconds(2) : this.pollInterval;
 
@@ -230,19 +240,25 @@ public class BatchExtract extends AbstractDocuDevsTask implements RunnableTask<B
         runContext.logger().info("Created DocuDevs batch job {}", batchGuid);
 
         try {
-            var uploadedCount = this.uploadFiles(batchApi, runContext, batchGuid, rFiles);
-            runContext.logger().info("Uploaded {} files to DocuDevs batch {}", uploadedCount, batchGuid);
+            var indexedFiles = this.uploadFiles(batchApi, runContext, batchGuid, rFiles, rIncludeSuccessfulFiles);
+            runContext.logger().info("Uploaded {} files to DocuDevs batch {}", rFiles.size(), batchGuid);
 
             this.processBatch(runContext, apiClient, batchGuid, rConfigName);
             runContext.logger().info("Started DocuDevs batch processing {}", batchGuid);
 
             var resultPayload = this.fetchBatchResult(runContext, apiClient, jobApi, facadeClient, batchGuid, rResultFormat, waitOptions);
 
+            var successfulFiles = rIncludeSuccessfulFiles
+                ? successfulFiles(indexedFiles, rResultFormat == ResultFormat.JSON
+                    ? resultPayload.result() : jobApi.resultJson(batchGuid))
+                : null;
+
             return Output.builder()
                 .jobGuid(batchGuid)
                 .status(resultPayload.status())
                 .tokenCount(resultPayload.tokenCount())
-                .uploadedCount(uploadedCount)
+                .uploadedCount(rFiles.size())
+                .successfulFiles(successfulFiles)
                 .resultFormat(rResultFormat.name())
                 .result(resultPayload.result())
                 .resultFile(resultPayload.resultFile())
@@ -280,18 +296,35 @@ public class BatchExtract extends AbstractDocuDevsTask implements RunnableTask<B
         }
     }
 
-    private int uploadFiles(BatchApi batchApi, RunContext runContext, String batchGuid, List<String> files) throws Exception {
-        var uploadedCount = 0;
+    private Map<Integer, String> uploadFiles(
+        BatchApi batchApi, RunContext runContext, String batchGuid, List<String> files, boolean trackIndices
+    ) throws Exception {
+        var indexedFiles = new HashMap<Integer, String>();
         for (var from : files) {
             var path = this.materializeInputFile(runContext, from);
             try {
-                batchApi.uploadBatchDocument(batchGuid, path.toFile());
-                uploadedCount++;
+                var upload = batchApi.uploadBatchDocument(batchGuid, path.toFile());
+                if (trackIndices) {
+                    var index = upload.getIndex();
+                    if (index == null || index < 0 || index >= files.size() || indexedFiles.putIfAbsent(index, from) != null) {
+                        throw new IllegalStateException("Invalid DocuDevs batch upload index for " + batchGuid);
+                    }
+                }
             } catch (ApiException e) {
                 throw new IllegalStateException("DocuDevs batch upload failed for " + batchGuid + ": " + e.getCode(), e);
             }
         }
-        return uploadedCount;
+        return indexedFiles;
+    }
+
+    private List<String> successfulFiles(Map<Integer, String> indexedFiles, Object result) {
+        if (!(result instanceof List<?> documents) || documents.size() != indexedFiles.size()) {
+            throw new IllegalStateException("DocuDevs batch results do not match the uploaded files");
+        }
+        return IntStream.range(0, documents.size())
+            .filter(index -> documents.get(index) != null)
+            .mapToObj(indexedFiles::get)
+            .toList();
     }
 
     private void processBatch(RunContext runContext, ApiClient apiClient, String batchGuid, String configName) throws Exception {
@@ -407,6 +440,12 @@ public class BatchExtract extends AbstractDocuDevsTask implements RunnableTask<B
             description = "Number of files uploaded to the DocuDevs batch job."
         )
         private final Integer uploadedCount;
+
+        @Schema(
+            title = "Successful input files",
+            description = "Original input references with a result, when includeSuccessfulFiles is enabled."
+        )
+        private final List<String> successfulFiles;
 
         @Schema(
             title = "Result format",

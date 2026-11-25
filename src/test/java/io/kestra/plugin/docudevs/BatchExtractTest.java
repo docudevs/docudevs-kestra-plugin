@@ -50,6 +50,36 @@ class BatchExtractTest {
     }
 
     @Test
+    void reportsOnlySuccessfulFilesUsingTheReturnedUploadIndex(@TempDir Path tempDir) throws Exception {
+        server.enqueue(jsonResponse("{\"jobGuid\":\"batch-123\",\"maxConcurrency\":1}"));
+        server.enqueue(jsonResponse("{\"jobGuid\":\"batch-123\",\"index\":1,\"totalDocuments\":1}"));
+        server.enqueue(jsonResponse("{\"jobGuid\":\"batch-123\",\"index\":0,\"totalDocuments\":2}"));
+        server.enqueue(jsonResponse("{\"jobGuid\":\"batch-123\",\"maxConcurrency\":1}"));
+        server.enqueue(jsonResponse("{\"status\":\"COMPLETED\",\"guid\":\"batch-123\",\"completedDocs\":1}"));
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("workbook"));
+        server.enqueue(jsonResponse("{\"status\":\"COMPLETED\",\"guid\":\"batch-123\",\"completedDocs\":1}"));
+        server.enqueue(jsonResponse("[null,{\"invoice\":\"ok\"}]"));
+
+        var successful = Files.writeString(Files.createDirectory(tempDir.resolve("a")).resolve("invoice.pdf"), "a");
+        var failed = Files.writeString(Files.createDirectory(tempDir.resolve("b")).resolve("invoice.pdf"), "b");
+        var task = BatchExtract.builder()
+            .id("batch")
+            .apiKey(Property.ofValue("batch-key"))
+            .baseUrl(Property.ofValue(server.url("/").toString()))
+            .files(Property.ofValue(List.of(successful.toString(), failed.toString())))
+            .resultFormat(Property.ofValue("EXCEL"))
+            .includeSuccessfulFiles(Property.ofValue(true))
+            .completionTimeout(Duration.ofSeconds(2))
+            .build();
+
+        var output = task.run(runContextFactory.of(Map.of()));
+
+        assertThat(output.getSuccessfulFiles(), is(List.of(successful.toString())));
+        assertThat(output.getResultFile(), notNullValue());
+        assertThat(server.getRequestCount(), is(8));
+    }
+
+    @Test
     void runUploadsMultipleFilesProcessesBatchAndStoresExcel(@TempDir Path tempDir) throws Exception {
         byte[] excelBytes = new byte[] {0x50, 0x4b, 0x03, 0x04, 0x10, 0x20, 0x30};
 
